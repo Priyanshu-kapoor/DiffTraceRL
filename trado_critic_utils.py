@@ -150,8 +150,7 @@ def format_code_response(trajectory_code: str, response_prefix: str, response_su
     - HumanEval: only the generated completion plus the closing fence, because
       the opening fence and scaffold already live inside `prefix`
     """
-    stripped = trajectory_code.rstrip("\n")
-    return f"{response_prefix}{stripped}{response_suffix}"
+    return f"{response_prefix}{trajectory_code}{response_suffix}"
 
 
 def format_mbpp_prompt(question: str) -> str:

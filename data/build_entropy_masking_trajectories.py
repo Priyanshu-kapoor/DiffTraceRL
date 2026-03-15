@@ -51,7 +51,16 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     return -(probs * torch.log(probs + 1e-9)).sum(dim=-1)
 
 
-def get_entropy(tokenizer, model, text: str) -> tuple[list[int] | None, list[float] | None]:
+def get_token_entropy(tokenizer, model, text: str) -> tuple[list[int] | None, list[float] | None]:
+    """
+    Return the full GPT-2 token ids plus one entropy score per token position.
+
+    The autoregressive model only produces next-token logits, so there is no
+    natural entropy value for token 0. We still emit the full token sequence
+    because downstream step maps are defined over all token positions. Token 0
+    gets a placeholder entropy that later forces it into the earliest reveal
+    group.
+    """
     inputs = tokenizer(text, return_tensors="pt")
     input_ids = inputs["input_ids"]
     if input_ids.shape[1] < 2:
@@ -61,10 +70,14 @@ def get_entropy(tokenizer, model, text: str) -> tuple[list[int] | None, list[flo
         outputs = model(**inputs)
 
     shift_logits = outputs.logits[:, :-1, :]
-    shift_labels = input_ids[:, 1:]
-    entropy = compute_entropy(shift_logits)
+    next_token_entropy = compute_entropy(shift_logits)[0].tolist()
+    full_ids = input_ids[0].tolist()
 
-    return shift_labels[0].tolist(), entropy[0].tolist()
+    # Token 0 has no preceding context, so put it into the lowest-entropy
+    # bucket. This keeps the trajectory dense without inventing a new schema.
+    full_entropy = [-1.0]
+    full_entropy.extend(next_token_entropy)
+    return full_ids, full_entropy
 
 
 def build_steps(tokens: list[int], entropy: list[float], step_ratio: float) -> list[list[int]]:
@@ -94,7 +107,7 @@ def main() -> None:
 
     for item in source_items:
         code_text = item[args.text_field]
-        tokens, entropy = get_entropy(tokenizer, model, code_text)
+        tokens, entropy = get_token_entropy(tokenizer, model, code_text)
         if tokens is None:
             continue
 

@@ -79,6 +79,16 @@ def load_jsonl(path: Path) -> list[dict]:
     return items
 
 
+def normalized_data_path(config) -> Path:
+    """Prefer the new normalized-data key while keeping the legacy fallback."""
+    path_str = config.critic.get("normalized_data_path")
+    if path_str is None:
+        path_str = config.critic.get("reference_data_path")
+    if path_str is None:
+        raise ValueError("critic.normalized_data_path or critic.reference_data_path must be configured")
+    return resolve_from_repo(path_str)
+
+
 def build_repo_dataset_entry(item: dict) -> dict:
     """
     Convert one normalized critic-source record into the JSON format expected by the
@@ -115,9 +125,7 @@ def ensure_repo_dataset(config) -> None:
     inside `sample/`. Rather than changing that code, we create the expected
     JSON file(s) here for the new critic pipeline only.
     """
-    source_path = resolve_from_repo(
-        config.critic.get("normalized_data_path", config.critic.reference_data_path)
-    )
+    source_path = normalized_data_path(config)
     items = load_jsonl(source_path)
 
     dataset = [build_repo_dataset_entry(item) for item in items]

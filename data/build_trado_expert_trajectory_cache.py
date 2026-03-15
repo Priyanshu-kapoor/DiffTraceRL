@@ -65,6 +65,66 @@ def dense_step_map_from_trajectory(trajectory: list[dict], token_count: int) -> 
     return step_map
 
 
+def normalized_data_path(config) -> Path:
+    """
+    Prefer the new normalized-data key, but keep the old fallback for configs
+    that still expose `reference_data_path`.
+    """
+    path_str = config.critic.get("normalized_data_path")
+    if path_str is None:
+        path_str = config.critic.get("reference_data_path")
+    if path_str is None:
+        raise ValueError("critic.normalized_data_path or critic.reference_data_path must be configured")
+    return resolve_repo_path(path_str)
+
+
+def upgrade_legacy_trajectory(
+    gpt2_ids: list[int],
+    trajectory_entry: dict,
+) -> tuple[list[int], list[dict]]:
+    """
+    Accept both the new full-token trajectory format and the legacy shifted one.
+
+    Older trajectory files stored `input_ids[1:]`, which drops token 0. When
+    that happens, we rebuild a dense full-token trajectory by assigning token 0
+    to the earliest reveal step.
+    """
+    stored_ids = list(trajectory_entry["tokens"])
+    stored_trajectory = list(trajectory_entry["trajectory"])
+    if stored_ids == gpt2_ids:
+        return stored_ids, stored_trajectory
+
+    if stored_ids != gpt2_ids[1:]:
+        raise ValueError(
+            f"GPT-2 token ids do not match the stored trajectory tokens for task_id={trajectory_entry['task_id']}"
+        )
+
+    if not stored_trajectory:
+        raise ValueError(f"Legacy shifted trajectory is empty for task_id={trajectory_entry['task_id']}")
+
+    rebuilt_trajectory = []
+    earliest_step = min(int(step_entry["step"]) for step_entry in stored_trajectory)
+    inserted_prefix = False
+
+    for step_entry in stored_trajectory:
+        step_id = int(step_entry["step"])
+        rebuilt_positions = [int(position) + 1 for position in step_entry["reveal_positions"]]
+        if not inserted_prefix and step_id == earliest_step:
+            rebuilt_positions = [0] + rebuilt_positions
+            inserted_prefix = True
+        rebuilt_trajectory.append(
+            {
+                "step": step_id,
+                "reveal_positions": rebuilt_positions,
+            }
+        )
+
+    if not inserted_prefix:
+        raise ValueError(f"Failed to rebuild legacy shifted trajectory for task_id={trajectory_entry['task_id']}")
+
+    return gpt2_ids, rebuilt_trajectory
+
+
 def build_char_step_map(text: str, offsets: list[tuple[int, int]], token_step_map: list[int]) -> list[int]:
     """
     Expand token-level reveal steps to a character-level array.
@@ -106,21 +166,38 @@ def trado_steps_for_formatted_response(
         * response prefix -> step 0
         * response suffix -> final code step
     """
-    trajectory_code = trajectory_code.rstrip("\n")
-    response = format_code_response(trajectory_code, response_prefix, response_suffix)
+    candidate_codes = [trajectory_code]
+    stripped_code = trajectory_code.rstrip("\n")
+    if stripped_code != trajectory_code:
+        candidate_codes.append(stripped_code)
 
-    gpt2_encoded = gpt2_tokenizer(trajectory_code, add_special_tokens=False, return_offsets_mapping=True)
-    gpt2_ids = list(gpt2_encoded["input_ids"])
-    gpt2_offsets = list(gpt2_encoded["offset_mapping"])
+    matched_code = None
+    gpt2_ids = None
+    gpt2_offsets = None
+    compatible_trajectory = None
+    for candidate_code in candidate_codes:
+        gpt2_encoded = gpt2_tokenizer(candidate_code, add_special_tokens=False, return_offsets_mapping=True)
+        candidate_ids = list(gpt2_encoded["input_ids"])
+        candidate_offsets = list(gpt2_encoded["offset_mapping"])
+        try:
+            _, candidate_trajectory = upgrade_legacy_trajectory(candidate_ids, trajectory_entry)
+        except ValueError:
+            continue
 
-    stored_ids = list(trajectory_entry["tokens"])
-    if gpt2_ids != stored_ids:
+        matched_code = candidate_code
+        gpt2_ids = candidate_ids
+        gpt2_offsets = candidate_offsets
+        compatible_trajectory = candidate_trajectory
+        break
+
+    if matched_code is None or gpt2_ids is None or gpt2_offsets is None or compatible_trajectory is None:
         raise ValueError(
             f"GPT-2 token ids do not match the stored trajectory tokens for task_id={trajectory_entry['task_id']}"
         )
 
-    gpt2_step_map = dense_step_map_from_trajectory(trajectory_entry["trajectory"], len(gpt2_ids))
-    code_char_steps = build_char_step_map(trajectory_code, gpt2_offsets, gpt2_step_map)
+    response = format_code_response(matched_code, response_prefix, response_suffix)
+    gpt2_step_map = dense_step_map_from_trajectory(compatible_trajectory, len(gpt2_ids))
+    code_char_steps = build_char_step_map(matched_code, gpt2_offsets, gpt2_step_map)
     last_step = max(gpt2_step_map)
 
     formatted_char_steps = [0] * len(response_prefix)
@@ -153,9 +230,7 @@ def main():
     config = get_config()
 
     trajectory_path = resolve_repo_path(config.critic.expert_trajectory_path)
-    normalized_path = resolve_repo_path(
-        config.critic.get("normalized_data_path", config.critic.reference_data_path)
-    )
+    normalized_path = normalized_data_path(config)
     cache_path = resolve_repo_path(config.critic.expert_cache_path)
 
     trajectories = load_jsonl(trajectory_path)
@@ -188,7 +263,11 @@ def main():
         ref_item = records_by_id[task_id]
         traj_item = trajectories_by_id[task_id]
 
-        if ref_item["question"] != traj_item["question"]:
+        traj_question = traj_item.get("question", traj_item.get("prompt"))
+        if traj_question is None:
+            raise ValueError(f"Trajectory entry is missing question/prompt for task_id={task_id}")
+
+        if ref_item["question"] != traj_question:
             raise ValueError(f"Question mismatch for task_id={task_id}")
 
         prompt = render_rollout_prompt(
