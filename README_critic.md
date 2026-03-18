@@ -55,6 +55,14 @@ python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/codec
 Set model paths first in the config you want to run, then launch:
 
 ```bash
+python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml experiment.preflight_only=true
+python rl_trado_critic.py config=configs/rl_trado_critic_humaneval_with_value.yaml experiment.preflight_only=true
+python rl_trado_critic.py config=configs/rl_trado_critic_codecontests_with_value.yaml experiment.preflight_only=true
+```
+
+If preflight succeeds, run the full training command:
+
+```bash
 python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml
 python rl_trado_critic.py config=configs/rl_trado_critic_humaneval_with_value.yaml
 python rl_trado_critic.py config=configs/rl_trado_critic_codecontests_with_value.yaml
@@ -74,4 +82,3 @@ Each run writes to its own project directory:
 - checkpoints under `<project>/ckpt/`
 - rollout files and reward JSON under `<project>/temp_data/`
 - result summaries under `<project>/results/`
-

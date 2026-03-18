@@ -6,6 +6,7 @@ wandb:
 experiment:
   project: "rl_trado_critic_humaneval_with_value"
   function: "train"
+  preflight_only: false
   start_from_scratch: true
   total_step: 80
   save_every: 10
@@ -124,4 +125,3 @@ critic:
   freeze_backbone: true
   pooling: "visible_response_mean"
   reward_mode: "delta_sigmoid"
-

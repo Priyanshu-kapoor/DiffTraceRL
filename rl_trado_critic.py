@@ -21,9 +21,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from omegaconf import OmegaConf
+from transformers import AutoConfig, AutoTokenizer
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -87,6 +89,118 @@ def normalized_data_path(config) -> Path:
     if path_str is None:
         raise ValueError("critic.normalized_data_path or critic.reference_data_path must be configured")
     return resolve_from_repo(path_str)
+
+
+def accelerate_config_path(config) -> Path:
+    return REPO_ROOT / "accelerate_configs" / f"{config.experiment.deepspeed_file}.yaml"
+
+
+def is_placeholder_model_ref(value: str | None) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text == "/abs/path/of/model" or "abs/path/of/model" in text
+
+
+def visible_gpu_count() -> int:
+    import torch
+
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd:
+        visible = [item.strip() for item in cvd.split(",") if item.strip() != ""]
+        return len(visible)
+    if not torch.cuda.is_available():
+        return 0
+    return int(torch.cuda.device_count())
+
+
+def warn_or_raise(config, message: str) -> None:
+    if bool(config.experiment.get("preflight_only", False)):
+        print(f"[preflight warning] {message}")
+        return
+    raise ValueError(message)
+
+
+def validate_model_references(config) -> None:
+    pretrained_model = str(config.model.pretrained_model)
+    value_base_model = str(config.model.value_base_model)
+
+    if is_placeholder_model_ref(pretrained_model):
+        raise ValueError("model.pretrained_model is still a placeholder. Set it to a real Trado model path or HF id.")
+    if is_placeholder_model_ref(value_base_model):
+        raise ValueError("model.value_base_model is still a placeholder. Set it to a real value-base model path or HF id.")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model, trust_remote_code=True, use_fast=True)
+    except Exception as exc:
+        raise ValueError(f"Failed to load tokenizer from model.pretrained_model={pretrained_model!r}: {exc}") from exc
+
+    if not getattr(tokenizer, "is_fast", False):
+        raise ValueError("The tokenizer loaded from model.pretrained_model is not a fast tokenizer.")
+    if tokenizer.pad_token_id is None:
+        raise ValueError("The tokenizer loaded from model.pretrained_model has no pad_token_id.")
+    if tokenizer.mask_token_id is None:
+        raise ValueError("The tokenizer loaded from model.pretrained_model has no mask_token_id.")
+
+    try:
+        AutoConfig.from_pretrained(value_base_model, trust_remote_code=True)
+    except Exception as exc:
+        raise ValueError(f"Failed to load config from model.value_base_model={value_base_model!r}: {exc}") from exc
+
+
+def run_preflight_checks(config) -> None:
+    validate_model_references(config)
+
+    normalized_path = normalized_data_path(config)
+    if not normalized_path.exists():
+        raise ValueError(f"critic.normalized_data_path does not exist: {normalized_path}")
+
+    trajectory_path = resolve_from_repo(str(config.critic.expert_trajectory_path))
+    if Path(trajectory_path).name == "masking_trajectories.jsonl":
+        raise ValueError(
+            "critic.expert_trajectory_path points to the old generic masking file. "
+            "Use the dataset-specific file such as mbpp_masking_trajectories.jsonl."
+        )
+    if not trajectory_path.exists():
+        raise ValueError(f"critic.expert_trajectory_path does not exist: {trajectory_path}")
+
+    accel_path = accelerate_config_path(config)
+    if not accel_path.exists():
+        raise ValueError(f"Accelerate config does not exist: {accel_path}")
+
+    accel_cfg = OmegaConf.load(accel_path)
+    required_processes = int(accel_cfg.get("num_processes", 0))
+    gpu_count = visible_gpu_count()
+    tp = int(config.rollout.tensor_parallel_size)
+
+    if gpu_count < tp:
+        warn_or_raise(
+            config,
+            f"Visible GPUs ({gpu_count}) are fewer than rollout.tensor_parallel_size ({tp}).",
+        )
+    if required_processes > 0 and gpu_count < required_processes:
+        warn_or_raise(
+            config,
+            f"Visible GPUs ({gpu_count}) are fewer than accelerate num_processes ({required_processes}).",
+        )
+
+    print(f"[preflight] normalized_data_path={normalized_path}")
+    print(f"[preflight] expert_trajectory_path={trajectory_path}")
+    print(f"[preflight] accelerate_config={accel_path}")
+    print(f"[preflight] visible_gpus={gpu_count} tensor_parallel_size={tp} accelerate_num_processes={required_processes}")
+
+
+def write_runtime_config(config) -> Path:
+    """
+    Save the merged runtime config once and reuse it for all child subprocesses.
+
+    This avoids the old bug where top-level CLI overrides were not seen by
+    child scripts because they only reread the original YAML file.
+    """
+    temp_dir = Path(tempfile.mkdtemp(prefix="rl_trado_critic_"))
+    runtime_config_path = temp_dir / "resolved_config.yaml"
+    OmegaConf.save(config, runtime_config_path, resolve=True)
+    return runtime_config_path
 
 
 def build_repo_dataset_entry(item: dict) -> dict:
@@ -282,7 +396,7 @@ def run_accelerate(config, script_name: str, **overrides) -> None:
         "--main_process_port",
         "8888",
         "--config_file",
-        f"accelerate_configs/{config.experiment.deepspeed_file}.yaml",
+        str(accelerate_config_path(config)),
         f"train/{script_name}",
         config_path_for_child(config, REPO_ROOT),
     ]
@@ -318,8 +432,16 @@ def main():
     if config.dataset.data_type != "code":
         raise ValueError("This standalone critic pipeline only supports code datasets")
 
+    run_preflight_checks(config)
+    runtime_config_path = write_runtime_config(config)
+    config.config = str(runtime_config_path)
+
     ensure_repo_dataset(config)
     build_expert_cache(config, int(config.experiment.current_epoch))
+
+    if bool(config.experiment.get("preflight_only", False)):
+        print(f"[critic-pipeline] preflight-only mode completed successfully with {runtime_config_path}")
+        return
 
     if config.experiment.start_from_scratch:
         initialize_run_artifacts(config)
