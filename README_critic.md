@@ -1,8 +1,15 @@
 # Trado Critic Runs
 
-This document explains the critic-training workflow that uses workspace-level
-data under `ai-project/data` and repo-local runtime outputs under
-`ai-project/repos/dLLM-RL/<project>/`.
+This document explains the standalone Trado critic-training workflow.
+
+Important environment note:
+- full RL training is meant for Linux, not native Windows
+- local native Windows is fine for CPU-safe checks, dataset prep, and launcher preflight debugging
+- the first real GPU-backed smoke run should happen on the professor's Linux machine
+
+Runtime layout:
+- workspace-level data lives under `ai-project/data`
+- repo-local outputs live under `ai-project/repos/dLLM-RL/<project>/`
 
 ## Workspace layout
 
@@ -24,7 +31,23 @@ ai-project/
     dLLM-RL/
 ```
 
-## 1. Download raw datasets
+## 1. Prepare the Linux training environment
+
+Run this on the Linux training machine from `repos/dLLM-RL`:
+
+```bash
+bash scripts/setup_linux_training_env.sh
+```
+
+If you want to inspect the environment without reinstalling anything:
+
+```bash
+python scripts/check_linux_training_env.py
+```
+
+That check must pass before any critic RL run.
+
+## 2. Download raw datasets
 
 Run from `repos/dLLM-RL`:
 
@@ -34,7 +57,7 @@ python data/download_raw_code_dataset.py --dataset humaneval
 python data/download_raw_code_dataset.py --dataset codecontests
 ```
 
-## 2. Prepare normalized critic-source JSONL
+## 3. Prepare normalized critic-source JSONL
 
 ```bash
 python data/prepare_critic_code_data.py --dataset mbpp
@@ -42,7 +65,7 @@ python data/prepare_critic_code_data.py --dataset humaneval
 python data/prepare_critic_code_data.py --dataset codecontests --pilot-size 1000
 ```
 
-## 3. Build GPT-2 masking trajectories
+## 4. Build GPT-2 masking trajectories
 
 ```bash
 python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/mbpp_critic.jsonl --output-jsonl ../../data/mbpp_masking_trajectories.jsonl
@@ -50,9 +73,10 @@ python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/human
 python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/codecontests_pilot_1000_critic.jsonl --output-jsonl ../../data/codecontests_pilot_1000_masking_trajectories.jsonl
 ```
 
-## 4. Launch critic RL training
+## 5. Run launcher preflight
 
-Set model paths first in the config you want to run, then launch:
+Set real model paths first, then run launcher preflight. You can either edit the
+config file or override the model paths on the command line.
 
 ```bash
 python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml experiment.preflight_only=true
@@ -60,7 +84,28 @@ python rl_trado_critic.py config=configs/rl_trado_critic_humaneval_with_value.ya
 python rl_trado_critic.py config=configs/rl_trado_critic_codecontests_with_value.yaml experiment.preflight_only=true
 ```
 
-If preflight succeeds, run the full training command:
+Preflight must succeed before rollout or training.
+
+## 6. Run the first real smoke test
+
+Start with MBPP. The helper script below runs preflight first and then launches
+a 1-step smoke run using CLI overrides instead of editing the tracked config.
+
+```bash
+export PRETRAINED_MODEL=/abs/path/to/your/trado-model
+export VALUE_BASE_MODEL=/abs/path/to/your/trado-model
+bash scripts/run_trado_critic_mbpp_smoke.sh
+```
+
+The smoke run is considered successful if it:
+- starts rollout
+- builds the expert cache
+- writes critic/value/policy artifacts
+- writes an evaluation result file
+
+## 7. Run the full training command
+
+Once the MBPP smoke run works, use the normal launcher:
 
 ```bash
 python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml
@@ -68,7 +113,12 @@ python rl_trado_critic.py config=configs/rl_trado_critic_humaneval_with_value.ya
 python rl_trado_critic.py config=configs/rl_trado_critic_codecontests_with_value.yaml
 ```
 
-## 5. Resume a stopped run
+Recommended order:
+1. MBPP smoke and short run
+2. HumanEval preflight and smoke
+3. CodeContests preflight and smoke
+
+## 8. Resume a stopped run
 
 Edit the config before restarting:
 - set `experiment.start_from_scratch: false`

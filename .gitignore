@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
-
+data/*_critic.json
+data/*_critic_smoke.json
+rl_trado_critic_mbpp_with_value/
+rl_trado_critic_humaneval_with_value/
+rl_trado_critic_codecontests_with_value/
+rl_trado_critic_mbpp_smoke/

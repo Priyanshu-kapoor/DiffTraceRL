@@ -6,6 +6,8 @@ set -euo pipefail
 #   bash scripts/run_trado_critic.sh configs/rl_trado_critic_mbpp_with_value.yaml
 
 CONFIG_PATH="${1:?pass a config path}"
+shift || true
 
-python rl_trado_critic.py "config=${CONFIG_PATH}"
-
+# Pass all extra OmegaConf overrides through to the launcher so smoke tests and
+# one-off machine-specific runs do not require editing tracked config files.
+python rl_trado_critic.py "config=${CONFIG_PATH}" "$@"

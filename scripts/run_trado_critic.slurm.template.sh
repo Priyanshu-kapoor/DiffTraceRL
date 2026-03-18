@@ -13,5 +13,13 @@
 set -euo pipefail
 
 CONFIG_PATH="${1:?pass a config path}"
+shift || true
 
-python rl_trado_critic.py "config=${CONFIG_PATH}"
+# Activate your training environment here before launching, for example:
+#   source ~/miniconda3/etc/profile.d/conda.sh
+#   conda activate dllm-rl
+
+# Run the launcher preflight first so the batch job fails fast on missing
+# models, missing data, or GPU/config mismatches.
+bash scripts/run_trado_critic.sh "$CONFIG_PATH" experiment.preflight_only=true "$@"
+bash scripts/run_trado_critic.sh "$CONFIG_PATH" "$@"
