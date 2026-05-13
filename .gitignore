@@ -6,3 +6,5 @@ rl_trado_critic_mbpp_with_value/
 rl_trado_critic_humaneval_with_value/
 rl_trado_critic_codecontests_with_value/
 rl_trado_critic_mbpp_smoke/
+smoke_model_windows/
+smoke_test_windows/

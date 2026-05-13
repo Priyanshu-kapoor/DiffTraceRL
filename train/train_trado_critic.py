@@ -213,7 +213,8 @@ def main():
         raise ValueError("No policy prefixes were available in the replay buffer")
 
     project_name = config.experiment.project
-    critic_checkpoint = "./" + project_name + "/ckpt/" + config.model.optimized_critic_name
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    critic_checkpoint = os.path.join(_repo_root, project_name, "ckpt", config.model.optimized_critic_name)
     tokenizer = AutoTokenizer.from_pretrained(critic_checkpoint, trust_remote_code=True)
     uni_prompting = UniversalPrompting(
         tokenizer,

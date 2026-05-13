@@ -250,13 +250,30 @@ def main():
         )
 
     gpt2_tokenizer = AutoTokenizer.from_pretrained("gpt2", use_fast=True)
+
+    # TraDo ships a custom Python tokenizer class via trust_remote_code; it
+    # reports is_fast=False and does not expose offset_mapping. Try without
+    # trust_remote_code first to get the built-in fast Qwen2 tokenizer, which
+    # reads tokenizer.json via the Rust backend and supports offset_mapping.
     trado_tokenizer = AutoTokenizer.from_pretrained(
         config.model.pretrained_model,
-        trust_remote_code=True,
+        trust_remote_code=False,
         use_fast=True,
     )
     if not getattr(trado_tokenizer, "is_fast", False):
-        raise ValueError("The configured Trado tokenizer is not a fast tokenizer")
+        # Fallback: try with trust_remote_code (some checkpoints need it to
+        # locate the tokenizer class even for the fast variant).
+        trado_tokenizer = AutoTokenizer.from_pretrained(
+            config.model.pretrained_model,
+            trust_remote_code=True,
+            use_fast=True,
+        )
+    if not getattr(trado_tokenizer, "is_fast", False):
+        raise ValueError(
+            f"Could not load a fast tokenizer for {config.model.pretrained_model!r}. "
+            "A fast tokenizer is required for offset mapping in the expert cache builder. "
+            "Ensure the 'tokenizers' library is installed and the model has a tokenizer.json file."
+        )
 
     records = []
     for task_id in sorted(record_ids):

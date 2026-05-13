@@ -1,0 +1,90 @@
+wandb:
+  entity: null
+  resume: "auto"
+
+experiment:
+  project: smoke_test_windows
+  function: train
+  current_epoch: 1
+  total_step: 1
+  eval_every: 1
+  save_every: 1
+  train_value_every: 1
+  num_node: 1
+  node_index: 0
+  deepspeed_file: 1_node_4_gpus_deepspeed_zero3
+
+model:
+  pretrained_model: C:/Users/Priyanshu kapoor/ai-project/repos/dLLM-RL/smoke_model_windows
+  value_base_model: C:/Users/Priyanshu kapoor/ai-project/repos/dLLM-RL/smoke_model_windows
+  optimized_name: optimized
+  optimized_value_name: optimized_value
+  optimized_critic_name: optimized_critic
+  model_base: trado
+
+dataset:
+  train_dataset: test_mbpp
+  optimization_data: test_mbpp_rl_data
+  data_type: code
+
+rollout:
+  tensor_parallel_size: 1
+  block_size: 4
+
+training:
+  block_size: 4
+  max_prompt_len: 256
+  max_gen_length: 128
+  seed: 42
+  gradient_accumulation_steps: 1
+  gradient_checkpointing_enable: true
+  batch_size_lm: 1
+  mixed_precision: "no"
+  enable_tf32: false
+  num_train_epochs: 1
+  max_grad_norm: 1.0
+  post_num: 0
+  shrink: 1
+  eps: 0.20
+  beta: 0.01
+  gam: 1.0
+  lam: 1.0
+  use_kl_estimator_k3: true
+  method: "TraceRL"
+
+optimizer:
+  name: adamw
+  params:
+    policy_learning_rate: 1e-6
+    value_learning_rate: 5e-6
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1e-8
+
+lr_scheduler:
+  scheduler: "cosine"
+  params:
+    learning_rate: 1e-6
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+evaluation:
+  eval_dataset: test_mbpp
+
+critic:
+  enabled: true
+  normalized_data_path: C:/Users/Priyanshu kapoor/ai-project/repos/dLLM-RL/smoke_data_windows/test_mbpp_critic.jsonl
+  expert_trajectory_path: C:/Users/Priyanshu kapoor/ai-project/repos/dLLM-RL/smoke_data_windows/test_mbpp_masking_trajectories.jsonl
+  expert_cache_path: smoke_test_windows/temp_data/expert_trado_cache.pt
+  buffer_path: smoke_test_windows/temp_data/critic_policy_buffer.pt
+  buffer_size: 64
+  learning_rate: 0.0001
+  batch_size: 4
+  num_steps_per_epoch: 2
+  freeze_backbone: true
+  pooling: visible_response_mean
+  reward_mode: delta_sigmoid
+
+config: C:/Users/Priyanshu kapoor/ai-project/repos/dLLM-RL/smoke_data_windows/smoke_config.yaml

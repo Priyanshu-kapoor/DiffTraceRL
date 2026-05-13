@@ -81,12 +81,21 @@ def main():
     # SETUP Accelerator     #
     #########################
     config = get_config()
+    _SMOKE_TEST = bool(OmegaConf.select(config, "smoke_test", default=False))
+
+    if _SMOKE_TEST:
+        os.environ["WANDB_MODE"] = "disabled"
+        config.training.batch_size_lm = 1
+        config.training.gradient_checkpointing_enable = True
+        config.training.num_train_epochs = 1
+        print("[smoke-test] Policy: batch_size=1, gradient_checkpointing=True, max 3 steps")
 
     project_name = config.experiment.project
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if config.experiment.current_epoch == 1:
-        pretrained_model = config.model.pretrained_model
+        pretrained_model = config.model.pretrained_model.replace("\\", "/")
     else:
-        pretrained_model = "./" + project_name + "/ckpt/" + config.model.optimized_name
+        pretrained_model = os.path.join(_repo_root, project_name, "ckpt", config.model.optimized_name).replace("\\", "/")
 
     # Enable TF32 on Ampere GPUs
     if config.training.enable_tf32:
@@ -163,21 +172,44 @@ def main():
                                        max_gen_length=config.training.max_gen_length,
                                        ignore_id=-100)
 
-    #from transformers import AutoModelForCausalLM
-    #model = AutoModelForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
-    model = SDARForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
-
-    # calculate loss ourselves, needs logits，so aviod fuse CE
-    if hasattr(model, "config"):
-        model.config.fuse_cross_entropy = False   
-    
-
-    if config.training.gradient_checkpointing_enable:
-        model.gradient_checkpointing_enable()
-        if hasattr(model, "config"):
-            model.config.use_cache = False
+    if _SMOKE_TEST:
+        from transformers import BitsAndBytesConfig
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        _bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        model = SDARForCausalLM.from_pretrained(
+            pretrained_model, trust_remote_code=True,
+            quantization_config=_bnb_cfg, device_map="auto",
+        )
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+        model = get_peft_model(model, LoraConfig(
+            r=8, lora_alpha=16, lora_dropout=0.05, bias="none",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        ))
+        model.print_trainable_parameters()
+        try:
+            model.base_model.model.config.fuse_cross_entropy = False
+        except AttributeError:
+            pass
     else:
-        model = model.to(accelerator.device)
+        #from transformers import AutoModelForCausalLM
+        #model = AutoModelForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
+        model = SDARForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
+
+        # calculate loss ourselves, needs logits, so avoid fuse CE
+        if hasattr(model, "config"):
+            model.config.fuse_cross_entropy = False
+
+        if config.training.gradient_checkpointing_enable:
+            model.gradient_checkpointing_enable()
+            if hasattr(model, "config"):
+                model.config.use_cache = False
+        else:
+            model = model.to(accelerator.device)
 
     mask_id = tokenizer.mask_token_id
     pad_id = tokenizer.pad_token_id
@@ -187,32 +219,41 @@ def main():
     #################################
     optimizer_config = config.optimizer.params
 
-    # no decay on bias and layernorm and embedding
-    no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in model.named_parameters() if
-                       p.requires_grad and not any(nd in n for nd in no_decay)],
-            "weight_decay": optimizer_config.weight_decay,
-        },
-        {
-            "params": [p for n, p in model.named_parameters() if
-                       p.requires_grad and any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
-    ]
-
-    optimizer_type = config.optimizer.name
-    if optimizer_type == "adamw":
+    if _SMOKE_TEST:
+        # Only train the small LoRA adapter parameters
         optimizer = AdamW(
-            optimizer_grouped_parameters,
-            lr=optimizer_config.policy_learning_rate,
+            [p for p in model.parameters() if p.requires_grad],
+            lr=float(optimizer_config.policy_learning_rate),
             betas=(optimizer_config.beta1, optimizer_config.beta2),
-            weight_decay=optimizer_config.weight_decay,
             eps=optimizer_config.epsilon,
         )
     else:
-        raise ValueError(f"Optimizer {optimizer_type} not supported")
+        # no decay on bias and layernorm and embedding
+        no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if
+                           p.requires_grad and not any(nd in n for nd in no_decay)],
+                "weight_decay": optimizer_config.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if
+                           p.requires_grad and any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+
+        optimizer_type = config.optimizer.name
+        if optimizer_type == "adamw":
+            optimizer = AdamW(
+                optimizer_grouped_parameters,
+                lr=optimizer_config.policy_learning_rate,
+                betas=(optimizer_config.beta1, optimizer_config.beta2),
+                weight_decay=optimizer_config.weight_decay,
+                eps=optimizer_config.epsilon,
+            )
+        else:
+            raise ValueError(f"Optimizer {optimizer_type} not supported")
 
 
 
@@ -261,6 +302,15 @@ def main():
     adv               = dataset_load["adv"]
     start_pos = dataset_load["meta"]["start_pos"]
     drop_num  = dataset_load["meta"]["drop_num"]
+
+    if _SMOKE_TEST:
+        _n = min(3, extended_input_ids.shape[0])
+        extended_input_ids = extended_input_ids[:_n]
+        p_mask             = p_mask[:_n]
+        tok_idx_ext        = tok_idx_ext[:_n]
+        labels             = labels[:_n]
+        adv                = adv[:_n]
+        print(f"[smoke-test] Truncated dataset to {_n} samples")
     
 
 
@@ -379,9 +429,15 @@ def main():
     #       Prepare accelerator     #
     #################################
     logger.info("Preparing model, optimizer and dataloaders")
-    model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
-        model, optimizer, lr_scheduler, train_dataloader_lm
-    )
+    if _SMOKE_TEST:
+        # 4-bit model is already on device via device_map="auto"; don't wrap it
+        optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+            optimizer, lr_scheduler, train_dataloader_lm
+        )
+    else:
+        model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+            model, optimizer, lr_scheduler, train_dataloader_lm
+        )
 
 
 
@@ -580,17 +636,25 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
 
                 torch.cuda.empty_cache()
-            
 
-                
+            if _SMOKE_TEST and step >= 3:
+                logger.info("[smoke-test] Reached 3 steps, stopping.")
+                break
 
 
     accelerator.wait_for_everyone()
 
-    # save checkpoint at the end of training
-    save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name)
-    if config.experiment.current_epoch % config.experiment.save_every == 0:
-        save_checkpoint(model, tokenizer, config, accelerator, f"epoch-{config.experiment.current_epoch}-policy")
+    if _SMOKE_TEST:
+        if accelerator.is_main_process:
+            _sd = Path(config.experiment.project) / "ckpt" / config.model.optimized_name
+            _sd.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(str(_sd))
+            tokenizer.save_pretrained(str(_sd))
+            print(f"[smoke-test] LoRA adapters saved to {_sd}")
+    else:
+        save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name)
+        if config.experiment.current_epoch % config.experiment.save_every == 0:
+            save_checkpoint(model, tokenizer, config, accelerator, f"epoch-{config.experiment.current_epoch}-policy")
 
     accelerator.end_training()
 

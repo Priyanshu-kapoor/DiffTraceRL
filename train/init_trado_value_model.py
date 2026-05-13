@@ -106,7 +106,8 @@ def save_checkpoint(model, tokenizer, config, name, accelerator=None):
     import time, json, shutil, os, glob, importlib, inspect
     import torch
 
-    output_dir = Path(f"../{config.experiment.project}")
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    output_dir = Path(_repo_root) / config.experiment.project
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _is_main():

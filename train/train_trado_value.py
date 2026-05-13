@@ -107,9 +107,18 @@ def main():
     # SETUP Accelerator     #
     #########################
     config = get_config()
+    _SMOKE_TEST = bool(OmegaConf.select(config, "smoke_test", default=False))
+
+    if _SMOKE_TEST:
+        os.environ["WANDB_MODE"] = "disabled"
+        config.training.batch_size_lm = 1
+        config.training.gradient_checkpointing_enable = True
+        config.training.num_train_epochs = 1
+        print("[smoke-test] Value: batch_size=1, gradient_checkpointing=True, max 3 steps")
 
     project_name = config.experiment.project
-    pretrained_model = "./" + project_name + "/ckpt/" + config.model.optimized_value_name
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pretrained_model = os.path.join(_repo_root, project_name, "ckpt", config.model.optimized_value_name).replace("\\", "/")
 
     from transformers import AutoConfig
     from train.init_sdar_value_model import _get_value_model
@@ -117,7 +126,19 @@ def main():
     value_model_class = _get_value_model(SDARForCausalLM, "value_head")
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model, trust_remote_code=True)
-    value_model = value_model_class.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
+    if _SMOKE_TEST:
+        # No 4-bit here: bitsandbytes quantizes value_head to uint8 which
+        # cannot have requires_grad=True. Load fp16, freeze backbone only.
+        value_model = value_model_class.from_pretrained(
+            pretrained_model, trust_remote_code=True,
+            torch_dtype=torch.float16, device_map="auto",
+        )
+        for name, param in value_model.named_parameters():
+            param.requires_grad_("value_head" in name)
+        trainable = sum(p.numel() for p in value_model.parameters() if p.requires_grad)
+        print(f"[smoke-test] Value model: {trainable:,} trainable params (value_head only, fp16)")
+    else:
+        value_model = value_model_class.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
 
     # Enable TF32 on Ampere GPUs
     if config.training.enable_tf32:
@@ -196,17 +217,17 @@ def main():
                                        ignore_id=-100)
     
 
-    # calculate loss ourselves, needs logits，so aviod fuse CE
-    if hasattr(value_model, "config"):
-        value_model.config.fuse_cross_entropy = False   
-    
-
-    if config.training.gradient_checkpointing_enable:
-        value_model.gradient_checkpointing_enable()
+    if not _SMOKE_TEST:
+        # calculate loss ourselves, needs logits, so avoid fuse CE
         if hasattr(value_model, "config"):
-            value_model.config.use_cache = False
-    else:
-        value_model = value_model.to(accelerator.device)
+            value_model.config.fuse_cross_entropy = False
+
+        if config.training.gradient_checkpointing_enable:
+            value_model.gradient_checkpointing_enable()
+            if hasattr(value_model, "config"):
+                value_model.config.use_cache = False
+        else:
+            value_model = value_model.to(accelerator.device)
 
     mask_id = tokenizer.mask_token_id
     pad_id = tokenizer.pad_token_id
@@ -216,32 +237,41 @@ def main():
     #################################
     optimizer_config = config.optimizer.params
 
-    # no decay on bias and layernorm and embedding
-    no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in value_model.named_parameters() if
-                       p.requires_grad and not any(nd in n for nd in no_decay)],
-            "weight_decay": optimizer_config.weight_decay,
-        },
-        {
-            "params": [p for n, p in value_model.named_parameters() if
-                       p.requires_grad and any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
-    ]
-
-    optimizer_type = config.optimizer.name
-    if optimizer_type == "adamw":
+    if _SMOKE_TEST:
+        # Only train the value_head (backbone is frozen in 4-bit)
         optimizer = AdamW(
-            optimizer_grouped_parameters,
-            lr=optimizer_config.value_learning_rate,
+            [p for p in value_model.parameters() if p.requires_grad],
+            lr=float(optimizer_config.value_learning_rate),
             betas=(optimizer_config.beta1, optimizer_config.beta2),
-            weight_decay=optimizer_config.weight_decay,
             eps=optimizer_config.epsilon,
         )
     else:
-        raise ValueError(f"Optimizer {optimizer_type} not supported")
+        # no decay on bias and layernorm and embedding
+        no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in value_model.named_parameters() if
+                           p.requires_grad and not any(nd in n for nd in no_decay)],
+                "weight_decay": optimizer_config.weight_decay,
+            },
+            {
+                "params": [p for n, p in value_model.named_parameters() if
+                           p.requires_grad and any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+
+        optimizer_type = config.optimizer.name
+        if optimizer_type == "adamw":
+            optimizer = AdamW(
+                optimizer_grouped_parameters,
+                lr=optimizer_config.value_learning_rate,
+                betas=(optimizer_config.beta1, optimizer_config.beta2),
+                weight_decay=optimizer_config.weight_decay,
+                eps=optimizer_config.epsilon,
+            )
+        else:
+            raise ValueError(f"Optimizer {optimizer_type} not supported")
 
 
 
@@ -573,8 +603,6 @@ def main():
     (extended_input_ids, p_mask, tok_idx_ext, labels, rewards,        # rewards all 0, as place-holder
         seq_ids_rows, sel_step_tail_rows, step_map_all, resp_input_ids_all) = collect_training_data(input_ids_lm, step_map_list, reward_scalar_list)
 
-
-    
     dataset_lm = TrainDataset(
         extended_input_ids, p_mask, tok_idx_ext, labels, rewards,
         seq_ids=seq_ids_rows,
@@ -620,9 +648,15 @@ def main():
     #       Prepare accelerator     #
     #################################
     logger.info("Preparing model, optimizer and dataloaders")
-    value_model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
-        value_model, optimizer, lr_scheduler, train_dataloader_lm
-    )
+    if _SMOKE_TEST:
+        # fp16 model already on device via device_map="auto"; don't wrap it
+        optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+            optimizer, lr_scheduler, train_dataloader_lm
+        )
+    else:
+        value_model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+            value_model, optimizer, lr_scheduler, train_dataloader_lm
+        )
 
 
     import torch.nn.functional as F
@@ -1069,17 +1103,25 @@ def main():
                 torch.cuda.empty_cache()
 
             loss_list.append(loss_lm.detach().float().cpu().item())
-            
 
-                
+            if _SMOKE_TEST and step >= 3:
+                logger.info("[smoke-test] Reached 3 steps, stopping.")
+                break
 
 
     accelerator.wait_for_everyone()
 
-    # save checkpoint at the end of training
-    save_checkpoint(value_model, tokenizer, config, accelerator, config.model.optimized_value_name)
-    if config.experiment.current_epoch % config.experiment.save_every == 0:
-        save_checkpoint(value_model, tokenizer, config, accelerator, f"epoch-{config.experiment.current_epoch}-value")
+    if _SMOKE_TEST:
+        if accelerator.is_main_process:
+            _sd = Path(config.experiment.project) / "ckpt" / config.model.optimized_value_name
+            _sd.mkdir(parents=True, exist_ok=True)
+            value_model.save_pretrained(str(_sd))
+            tokenizer.save_pretrained(str(_sd))
+            print(f"[smoke-test] Value model saved to {_sd}")
+    else:
+        save_checkpoint(value_model, tokenizer, config, accelerator, config.model.optimized_value_name)
+        if config.experiment.current_epoch % config.experiment.save_every == 0:
+            save_checkpoint(value_model, tokenizer, config, accelerator, f"epoch-{config.experiment.current_epoch}-value")
 
     accelerator.end_training()
 

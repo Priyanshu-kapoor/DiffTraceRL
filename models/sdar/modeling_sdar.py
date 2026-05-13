@@ -46,13 +46,18 @@ from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
 from .configuration_sdar import SDARConfig
 
-from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
+try:
+    from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
+    _FLASH_RMS_NORM_AVAILABLE = True
+except ImportError:
+    flash_rms_norm = None
+    _FLASH_RMS_NORM_AVAILABLE = False
 
 import torch.nn.functional as F
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
-except:
+except ImportError:
     pass
 
 try:
@@ -81,16 +86,14 @@ class SDARRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        return flash_rms_norm(
-            hidden_states, weight=self.weight, bias=None, eps=self.variance_epsilon)
-        '''
+        if _FLASH_RMS_NORM_AVAILABLE:
+            return flash_rms_norm(
+                hidden_states, weight=self.weight, bias=None, eps=self.variance_epsilon)
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * \
-            torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
-        '''
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -429,7 +432,6 @@ class SDARDecoderLayer(GradientCheckpointingLayer):
         return outputs
 
 
-@auto_docstring
 class SDARPreTrainedModel(PreTrainedModel):
     config_class = SDARConfig
     base_model_prefix = "model"
@@ -498,7 +500,6 @@ class SDARRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-@auto_docstring
 class SDARModel(SDARPreTrainedModel):
     def __init__(self, config: SDARConfig):
         super().__init__(config)
@@ -525,7 +526,6 @@ class SDARModel(SDARPreTrainedModel):
         self.embed_tokens = value
 
     @can_return_tuple
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -799,7 +799,6 @@ class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs):
     ...
 
 
-@auto_docstring
 class SDARForCausalLM(SDARPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
@@ -834,7 +833,6 @@ class SDARForCausalLM(SDARPreTrainedModel, GenerationMixin):
         return self.model
 
     @can_return_tuple
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

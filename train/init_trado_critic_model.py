@@ -79,7 +79,8 @@ def main():
     critic_model_class = _get_critic_model(SDARForCausalLM, "critic_head")
 
     source_path = policy_source_path(config)
-    critic_save_dir = os.path.join("..", config.experiment.project, "ckpt", config.model.optimized_critic_name)
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    critic_save_dir = os.path.join(_repo_root, config.experiment.project, "ckpt", config.model.optimized_critic_name)
 
     tokenizer = AutoTokenizer.from_pretrained(source_path, trust_remote_code=True)
 

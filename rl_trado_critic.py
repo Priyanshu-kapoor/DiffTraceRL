@@ -136,7 +136,14 @@ def validate_model_references(config) -> None:
         raise ValueError(f"Failed to load tokenizer from model.pretrained_model={pretrained_model!r}: {exc}") from exc
 
     if not getattr(tokenizer, "is_fast", False):
-        raise ValueError("The tokenizer loaded from model.pretrained_model is not a fast tokenizer.")
+        # TraDo ships a custom Python tokenizer class via trust_remote_code; it
+        # reports is_fast=False but still has the required special tokens.
+        # The expert cache builder handles fast-tokenizer loading separately.
+        print(
+            f"[preflight warning] Tokenizer from model.pretrained_model={pretrained_model!r} "
+            "is not a fast tokenizer (expected for TraDo models with custom tokenizer classes). "
+            "The expert cache builder will load a fast variant separately for offset mapping."
+        )
     if tokenizer.pad_token_id is None:
         raise ValueError("The tokenizer loaded from model.pretrained_model has no pad_token_id.")
     if tokenizer.mask_token_id is None:

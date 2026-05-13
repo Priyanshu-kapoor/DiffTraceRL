@@ -112,7 +112,8 @@ def main():
     if not flat_samples:
         raise ValueError("Rollout outputs contain no policy samples to score")
 
-    critic_checkpoint = "./" + config.experiment.project + "/ckpt/" + config.model.optimized_critic_name
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    critic_checkpoint = os.path.join(_repo_root, config.experiment.project, "ckpt", config.model.optimized_critic_name)
     tokenizer = AutoTokenizer.from_pretrained(critic_checkpoint, trust_remote_code=True)
     uni_prompting = UniversalPrompting(
         tokenizer,
