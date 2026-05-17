@@ -91,8 +91,46 @@ def normalized_data_path(config) -> Path:
     return resolve_from_repo(path_str)
 
 
+def select_deepspeed_config(config) -> Path:
+    """Pick the accelerate config for the available GPUs.
+
+    If experiment.deepspeed_file is 'auto' or the named file requires a
+    different number of processes than the visible GPU count, automatically
+    fall back to the best matching config in accelerate_configs/.
+    """
+    n_gpus = visible_gpu_count()
+    n_nodes = int(OmegaConf.select(config, "experiment.num_node", default=1))
+
+    explicit = str(OmegaConf.select(config, "experiment.deepspeed_file", default="auto"))
+    if explicit and explicit != "auto":
+        explicit_path = REPO_ROOT / "accelerate_configs" / f"{explicit}.yaml"
+        if explicit_path.exists():
+            accel_cfg = OmegaConf.load(explicit_path)
+            cfg_procs = int(accel_cfg.get("num_processes", 0))
+            if cfg_procs == 0 or cfg_procs == n_gpus * n_nodes:
+                return explicit_path
+            print(
+                f"[config] deepspeed_file={explicit!r} expects {cfg_procs} process(es) "
+                f"but {n_gpus * n_nodes} GPU(s) visible — auto-selecting instead"
+            )
+
+    for stage in [3, 2]:
+        candidate = REPO_ROOT / "accelerate_configs" / f"{n_nodes}_node_{n_gpus}_gpus_deepspeed_zero{stage}.yaml"
+        if candidate.exists():
+            print(f"[config] Auto-selected accelerate config: {candidate.name}")
+            return candidate
+
+    available = sorted(p.name for p in (REPO_ROOT / "accelerate_configs").glob("*.yaml"))
+    raise FileNotFoundError(
+        f"No accelerate config found for {n_nodes} node(s) × {n_gpus} GPU(s). "
+        f"Expected: {n_nodes}_node_{n_gpus}_gpus_deepspeed_zero3.yaml\n"
+        f"Available configs: {available}"
+    )
+
+
+# Keep old name as an alias so any external callers are not broken.
 def accelerate_config_path(config) -> Path:
-    return REPO_ROOT / "accelerate_configs" / f"{config.experiment.deepspeed_file}.yaml"
+    return select_deepspeed_config(config)
 
 
 def is_placeholder_model_ref(value: str | None) -> bool:

@@ -5,11 +5,65 @@ This document explains the standalone Trado critic-training workflow.
 Important environment note:
 - full RL training is meant for Linux, not native Windows
 - local native Windows is fine for CPU-safe checks, dataset prep, and launcher preflight debugging
-- the first real GPU-backed smoke run should happen on the professor's Linux machine
+- the first real GPU-backed smoke run should happen on the Linux machine
 
 Runtime layout:
 - workspace-level data lives under `ai-project/data`
 - repo-local outputs live under `ai-project/repos/dLLM-RL/<project>/`
+
+## 0. Download the model from HuggingFace
+
+The training pipeline needs the Trado-4B-Instruct weights on disk before it can run.
+Download them once to a local directory and then point config paths at that directory.
+
+**Option A — huggingface-cli (recommended)**
+```bash
+pip install -U huggingface_hub          # already in requirements.txt
+huggingface-cli download Gen-Verse/TraDo-4B-Instruct \
+    --repo-type model \
+    --local-dir /path/to/models/TraDo-4B-Instruct
+```
+
+**Option B — Python snapshot download**
+```python
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="Gen-Verse/TraDo-4B-Instruct",
+    local_dir="/path/to/models/TraDo-4B-Instruct",
+)
+```
+
+**Option C — git lfs (requires git-lfs installed)**
+```bash
+git lfs install
+git clone https://huggingface.co/Gen-Verse/TraDo-4B-Instruct \
+    /path/to/models/TraDo-4B-Instruct
+```
+
+After downloading, note the full path — you will use it as `model.pretrained_model`
+and `model.value_base_model` in the config (both point to the same checkpoint for
+the first run).
+
+**Future model (LLaDA 2.0):** when ready to switch, download `GSAI-ML/LLaDA-8B-Instruct`
+(or its 2.0 successor) the same way and set `model.model_base: llada` in the config.
+The training scripts already support LLaDA.
+
+## GPU requirements and automatic config selection
+
+The training scripts automatically select the right DeepSpeed accelerate config
+based on the number of visible GPUs — no manual config change is needed when
+moving between setups:
+
+| Setup | DeepSpeed config auto-selected |
+|-------|-------------------------------|
+| 1× TITAN RTX 24 GB | `1_node_1_gpu_deepspeed_zero3.yaml` |
+| 2× L40S 48 GB | `1_node_2_gpus_deepspeed_zero3.yaml` |
+
+All configs use ZeRO-3 with CPU offload for both parameters and the optimizer,
+so Trado-4B fits comfortably on a single 24 GB GPU.
+
+To override the auto-selection, set `experiment.deepspeed_file` in the config to
+the desired filename (without the `.yaml` extension).
 
 ## Which model to use
 
@@ -94,43 +148,60 @@ python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/codec
 
 ## 5. Run launcher preflight
 
-Set real model paths first, then run launcher preflight. You can either edit the
-config file or override the model paths on the command line.
+Set real model paths first, then run launcher preflight.
+Use `configs/rl_trado_critic_mbpp_linux.yaml` — it has `deepspeed_file: auto`
+so it works on both 1-GPU and 2-GPU setups without any edits.
 
 ```bash
-python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml model.pretrained_model=Gen-Verse/TraDo-4B-Instruct model.value_base_model=Gen-Verse/TraDo-4B-Instruct experiment.preflight_only=true
-python rl_trado_critic.py config=configs/rl_trado_critic_humaneval_with_value.yaml experiment.preflight_only=true
-python rl_trado_critic.py config=configs/rl_trado_critic_codecontests_with_value.yaml experiment.preflight_only=true
+MODEL=/path/to/models/TraDo-4B-Instruct
+python rl_trado_critic.py \
+    config=configs/rl_trado_critic_mbpp_linux.yaml \
+    model.pretrained_model=$MODEL \
+    model.value_base_model=$MODEL \
+    experiment.preflight_only=true
 ```
 
-Preflight must succeed before rollout or training.
+Preflight must succeed (no errors) before rollout or training.
 
 ## 6. Run the first real smoke test
 
-Start with MBPP. The helper script below runs preflight first and then launches
-a 1-step smoke run using CLI overrides instead of editing the tracked config.
-
 ```bash
-export PRETRAINED_MODEL=Gen-Verse/TraDo-4B-Instruct
-export VALUE_BASE_MODEL=Gen-Verse/TraDo-4B-Instruct
-bash scripts/run_trado_critic_mbpp_smoke.sh
+MODEL=/path/to/models/TraDo-4B-Instruct
+export PRETRAINED_MODEL=$MODEL
+export VALUE_BASE_MODEL=$MODEL
+bash scripts/run_trado_critic_mbpp_smoke.sh configs/rl_trado_critic_mbpp_linux.yaml
 ```
-
-If the model is already downloaded locally, you can replace the Hugging Face id
-with the local checkpoint path.
 
 Recommended exact first-run order:
 
 ```bash
+# 1. environment
 bash scripts/setup_linux_training_env.sh
 python scripts/check_linux_training_env.py
+
+# 2. model download (once)
+huggingface-cli download Gen-Verse/TraDo-4B-Instruct \
+    --repo-type model --local-dir /path/to/models/TraDo-4B-Instruct
+
+# 3. datasets
 python data/download_raw_code_dataset.py --dataset mbpp
 python data/prepare_critic_code_data.py --dataset mbpp
-python data/build_entropy_masking_trajectories.py --input-jsonl ../../data/mbpp_critic.jsonl --output-jsonl ../../data/mbpp_masking_trajectories.jsonl
-export PRETRAINED_MODEL=Gen-Verse/TraDo-4B-Instruct
-export VALUE_BASE_MODEL=Gen-Verse/TraDo-4B-Instruct
-python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_with_value.yaml model.pretrained_model=Gen-Verse/TraDo-4B-Instruct model.value_base_model=Gen-Verse/TraDo-4B-Instruct experiment.preflight_only=true
-bash scripts/run_trado_critic_mbpp_smoke.sh
+python data/build_entropy_masking_trajectories.py \
+    --input-jsonl ../../data/mbpp_critic.jsonl \
+    --output-jsonl ../../data/mbpp_masking_trajectories.jsonl
+
+# 4. preflight
+MODEL=/path/to/models/TraDo-4B-Instruct
+python rl_trado_critic.py \
+    config=configs/rl_trado_critic_mbpp_linux.yaml \
+    model.pretrained_model=$MODEL \
+    model.value_base_model=$MODEL \
+    experiment.preflight_only=true
+
+# 5. smoke run (1 step)
+export PRETRAINED_MODEL=$MODEL
+export VALUE_BASE_MODEL=$MODEL
+bash scripts/run_trado_critic_mbpp_smoke.sh configs/rl_trado_critic_mbpp_linux.yaml
 ```
 
 The smoke run is considered successful if it:

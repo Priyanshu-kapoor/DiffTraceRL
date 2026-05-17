@@ -1,14 +1,52 @@
 import os
 import sys
 import subprocess
+from pathlib import Path
 from termcolor import cprint
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
+
+
 def get_config():
     cli_conf = OmegaConf.from_cli()
     yaml_conf = OmegaConf.load(cli_conf.config)
     conf = OmegaConf.merge(yaml_conf, cli_conf)
     return conf
+
+
+def _select_accel_config(config) -> str:
+    """Return the accelerate config path, auto-detecting GPU count if needed."""
+    try:
+        import torch
+        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    except Exception:
+        n_gpus = 1
+
+    explicit = str(OmegaConf.select(config, "experiment.deepspeed_file", default="auto"))
+    if explicit and explicit != "auto":
+        candidate = Path("accelerate_configs") / f"{explicit}.yaml"
+        if candidate.exists():
+            accel_cfg = OmegaConf.load(candidate)
+            cfg_procs = int(accel_cfg.get("num_processes", 0))
+            if cfg_procs == 0 or cfg_procs == n_gpus:
+                return str(candidate)
+            print(
+                f"[config] deepspeed_file={explicit!r} expects {cfg_procs} process(es) "
+                f"but {n_gpus} GPU(s) visible — auto-selecting instead"
+            )
+
+    for stage in [3, 2]:
+        candidate = Path("accelerate_configs") / f"1_node_{n_gpus}_gpus_deepspeed_zero{stage}.yaml"
+        if candidate.exists():
+            print(f"[config] Auto-selected accelerate config: {candidate.name}")
+            return str(candidate)
+
+    available = sorted(p.name for p in Path("accelerate_configs").glob("*.yaml"))
+    raise FileNotFoundError(
+        f"No accelerate config for {n_gpus} GPU(s). "
+        f"Create accelerate_configs/1_node_{n_gpus}_gpus_deepspeed_zero3.yaml\n"
+        f"Available: {available}"
+    )
 
 if __name__ == "__main__":
     config = get_config()
@@ -133,13 +171,14 @@ if __name__ == "__main__":
                 script_name = "train_sdar_value.py"
             elif model_base == "trado":
                 script_name = "train_trado_value.py"
+        accel_cfg = _select_accel_config(config)
         subprocess.run(
             f'accelerate launch '
             f'--num_machines 1 '
             f'--machine_rank 0 '
             f'--main_process_ip 127.0.0.1 '
             f'--main_process_port 8888 '
-            f'--config_file accelerate_configs/{config.experiment.deepspeed_file}.yaml '
+            f'--config_file {accel_cfg} '
             f'train/{script_name} '
             f'config=configs/{project_name}.yaml '
             f'experiment.current_epoch={i} ',

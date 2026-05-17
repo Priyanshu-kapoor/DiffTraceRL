@@ -104,6 +104,76 @@ print(cleaned_text)
 
 ```
 
+## ⬇️ Downloading Models
+
+All models are hosted on HuggingFace. Download them once to a local directory
+before running any training or evaluation commands.
+
+**TraDo-4B-Instruct** (recommended starting point, ~8 GB):
+```bash
+pip install -U huggingface_hub        # already in requirements.txt
+huggingface-cli download Gen-Verse/TraDo-4B-Instruct \
+    --repo-type model \
+    --local-dir /path/to/models/TraDo-4B-Instruct
+```
+
+**TraDo-8B-Instruct** (~16 GB):
+```bash
+huggingface-cli download Gen-Verse/TraDo-8B-Instruct \
+    --repo-type model \
+    --local-dir /path/to/models/TraDo-8B-Instruct
+```
+
+**LLaDA-8B-Instruct** (for LLaDA-based experiments):
+```bash
+huggingface-cli download GSAI-ML/LLaDA-8B-Instruct \
+    --repo-type model \
+    --local-dir /path/to/models/LLaDA-8B-Instruct
+```
+
+After downloading, point `model.pretrained_model` (and `model.value_base_model`
+when using a value model) at the local directory in your config file — or pass
+them as CLI overrides:
+
+```bash
+python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_linux.yaml \
+    model.pretrained_model=/path/to/models/TraDo-4B-Instruct \
+    model.value_base_model=/path/to/models/TraDo-4B-Instruct
+```
+
+### GPU requirements
+
+The code automatically selects the right DeepSpeed config based on the number of
+visible GPUs — no manual config editing is needed when switching between setups.
+
+| Setup | VRAM | Notes |
+|-------|------|-------|
+| 1× GPU (e.g. TITAN RTX 24 GB) | 24 GB | ZeRO-3 + CPU offload; Trado-4B fits |
+| 2× GPU (e.g. 2× L40S 48 GB) | 96 GB total | set `rollout.tensor_parallel_size: 2` |
+
+To start training:
+```bash
+# 1. Set up environment (Linux only)
+bash scripts/setup_linux_training_env.sh
+python scripts/check_linux_training_env.py
+
+# 2. Download model (see above)
+
+# 3. Download and prepare data
+python data/download_raw_code_dataset.py --dataset mbpp
+python data/prepare_critic_code_data.py --dataset mbpp
+python data/build_entropy_masking_trajectories.py \
+    --input-jsonl ../../data/mbpp_critic.jsonl \
+    --output-jsonl ../../data/mbpp_masking_trajectories.jsonl
+
+# 4. Run the critic RL pipeline (auto-selects GPU config)
+python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_linux.yaml \
+    model.pretrained_model=/path/to/models/TraDo-4B-Instruct \
+    model.value_base_model=/path/to/models/TraDo-4B-Instruct
+```
+
+See `README_critic.md` for the full step-by-step guide.
+
 ## 📰 Latest Updates
 * **[2026-01-26]** Our [TraceRL](https://openreview.net/forum?id=KNAyc9DMe3) paper has been accepted by ICLR 2026! 
 * **[2025-12-07]** 🔥 We support RLHF, fine-grained process reward, and multimodal RL/SFT now!

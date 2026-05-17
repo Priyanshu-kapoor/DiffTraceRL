@@ -1,0 +1,143 @@
+# Trado-4B critic RL on MBPP — Linux single/dual GPU config
+#
+# Tested setups:
+#   1× NVIDIA TITAN RTX (24 GB)  — set rollout.tensor_parallel_size: 1
+#   2× NVIDIA L40S     (48 GB)   — set rollout.tensor_parallel_size: 2
+#
+# GPU selection is automatic: experiment.deepspeed_file: auto picks the
+# right accelerate_configs/ file for however many GPUs are visible.
+# No code or config changes are needed when moving between 1 and 2 GPUs.
+#
+# Before running, set the two model paths below (or pass them on the CLI):
+#   python rl_trado_critic.py config=configs/rl_trado_critic_mbpp_linux.yaml \
+#       model.pretrained_model=/path/to/TraDo-4B-Instruct \
+#       model.value_base_model=/path/to/TraDo-4B-Instruct
+
+wandb:
+  entity: null
+  resume: "auto"
+
+experiment:
+  project: "rl_trado_critic_mbpp_linux"
+  function: "train"
+  preflight_only: false
+  start_from_scratch: true
+  total_step: 80
+  save_every: 10
+  eval_every: 10
+  train_value_every: 1
+  current_epoch: 1
+  # 'auto' selects the config that matches torch.cuda.device_count() at launch.
+  # You can also set this explicitly, e.g. "1_node_2_gpus_deepspeed_zero3".
+  deepspeed_file: "auto"
+  num_node: 1
+  node_index: 0
+
+model:
+  # Set to local path after downloading (see README_critic.md §0):
+  #   e.g. /home/user/models/TraDo-4B-Instruct
+  # Or use the HuggingFace id directly (requires internet or HF cache):
+  #   Gen-Verse/TraDo-4B-Instruct
+  pretrained_model: "/abs/path/to/TraDo-4B-Instruct"
+  value_base_model: "/abs/path/to/TraDo-4B-Instruct"
+  optimized_name: "optimized"
+  optimized_value_name: "optimized_value"
+  optimized_critic_name: "optimized_critic"
+  model_base: "trado"
+
+dataset:
+  train_dataset: "mbpp_critic"
+  optimization_data: "mbpp_critic_rl_data"
+  data_type: "code"
+
+rollout:
+  # Set tensor_parallel_size to the number of GPUs you want vLLM to use
+  # for rollout (typically equal to your total GPU count).
+  tensor_parallel_size: 1   # change to 2 if running on 2× L40S
+  max_active: 256
+  num_task_per_step: 64
+  num_response_per_task: 16
+  temperature: 1.0
+  max_token: 2000
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: 0
+  remasking_strategy: "low_confidence_dynamic"
+  dynamic_threshold: 0.9
+  start_with_think: false
+
+execute:
+  num_chunk: 128
+
+training:
+  gradient_checkpointing_enable: true
+  # effective batch = batch_size_lm × gradient_accumulation_steps × num_gpus
+  # 1 GPU:  1 × 32 × 1 = 32
+  # 2 GPUs: 1 × 16 × 2 = 32  (halve accumulation on 2-GPU runs)
+  gradient_accumulation_steps: 32
+  batch_size_lm: 1
+  mixed_precision: "bf16"
+  enable_tf32: true
+  seed: 10086
+  num_train_epochs: 1
+  max_grad_norm: 1.0
+  method: "TraceRL"
+  block_size: 4
+  shrink: 1
+  post_num: 0
+  max_gen_length: 2000
+  max_prompt_len: 784
+  eps: 0.20
+  beta: 0.01
+  gam: 1.0
+  lam: 1.0
+  use_kl_estimator_k3: true
+
+optimizer:
+  name: adamw
+  params:
+    policy_learning_rate: 1e-6
+    value_learning_rate: 5e-6
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1e-8
+
+lr_scheduler:
+  scheduler: "cosine"
+  params:
+    learning_rate: ${optimizer.params.policy_learning_rate}
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+evaluation:
+  eval_dataset: "mbpp_critic"
+  data_type: "code"
+  tensor_parallel_size: 1
+  max_active: 256
+  num_response_per_task: 3
+  temperature: 1.0
+  max_token: 2000
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: [0]
+  remasking_strategy: ["low_confidence_dynamic"]
+  dynamic_threshold: 0.9
+  start_with_think: false
+
+critic:
+  enabled: true
+  normalized_data_path: "../../data/mbpp_critic.jsonl"
+  expert_trajectory_path: "../../data/mbpp_masking_trajectories.jsonl"
+  expert_cache_path: "${experiment.project}/temp_data/expert_trado_cache.pt"
+  buffer_path: "${experiment.project}/temp_data/critic_policy_buffer.pt"
+  buffer_size: 4096
+  learning_rate: 1e-4
+  batch_size: 16
+  num_steps_per_epoch: 200
+  freeze_backbone: true
+  pooling: "visible_response_mean"
+  reward_mode: "delta_sigmoid"
