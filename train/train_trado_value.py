@@ -735,7 +735,7 @@ def main():
         batch_size=config.training.batch_size_lm,
     )
 
-
+    torch.cuda.empty_cache()
 
 
 
