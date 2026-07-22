@@ -93,7 +93,12 @@ def prepare_mbpp(data_root: Path) -> list[dict]:
             {
                 "source_dataset": "mbpp",
                 "task_id": str(row["task_id"]),
-                "question": row["text"],
+                "question": (
+                    "You are an expert Python programmer, and here is your task:\n"
+                    + row["text"]
+                    + "\nYour code should pass these tests:\n\n"
+                    + "\n".join(row["test_list"])
+                ),
                 "reference_code": row["code"],
                 "trajectory_code": row["code"],
                 "test_method": "function",

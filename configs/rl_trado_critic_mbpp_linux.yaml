@@ -117,7 +117,12 @@ evaluation:
   data_type: "code"
   tensor_parallel_size: 1
   max_active: 256
-  num_response_per_task: 3
+  # NOTE: intentionally lower than rollout.num_response_per_task (16).
+  # Training needs 16 diverse samples per task to build a good RL batch;
+  # evaluation only needs enough for an accurate pass@1 estimate.
+  # With 8 samples, pass@1 = c/n has std ≈ 0.07 for p≈0.5 (vs 0.16 with 3).
+  # Raise to 16 if you want evaluation and training to be directly comparable.
+  num_response_per_task: 8
   temperature: 1.0
   max_token: 512
   block_size: 4

@@ -122,6 +122,7 @@ def evaluate_function_dataset(data: list[dict], n_workers: int | None = None):
             fut = pool.submit(_check_snippet_many, snippet, tests, t_limit)
             futures[fut] = (idx, i)
 
+        _verbose = os.environ.get("RLEXEC_VERBOSE") == "1"
         for fut in as_completed(futures):
             idx, i = futures[fut]
             try:
@@ -132,6 +133,16 @@ def evaluate_function_dataset(data: list[dict], n_workers: int | None = None):
             for j, ok in enumerate(ok_list):
                 data[idx]["execution_result"][i][j] = bool(ok)
                 data[idx]["correctness"][i][j]      = bool(ok)
+                if _verbose and not ok:
+                    snippet = data[idx]["extracted_output"][i]
+                    test_stmt = data[idx]["test_list"][j]
+                    print(
+                        f"\n[RLEXEC] FAIL task={data[idx].get('task_id','?')} "
+                        f"response={i} test={j}\n"
+                        f"  test:    {test_stmt}\n"
+                        f"  snippet: {snippet[:300]}",
+                        file=sys.stderr,
+                    )
                 pbar.update(1)
 
     return data
@@ -294,7 +305,16 @@ def evaluate_stdio_dataset(data: list[dict], num_chunks: int):
             item["correctness"][c_idx].append(False)
         item["execution_result"][c_idx][k] = res
         exp_out = item["test_output"][k]
-        item["correctness"][c_idx][k]      = test_if_eq(res, exp_out)
+        match = test_if_eq(res, exp_out)
+        item["correctness"][c_idx][k] = match
+        if os.environ.get("RLEXEC_VERBOSE") == "1" and not match:
+            print(
+                f"\n[RLEXEC] FAIL task={item.get('task_id','?')} "
+                f"response={c_idx} case={k}\n"
+                f"  expected: {exp_out[:200]}\n"
+                f"  got:      {res[:200]}",
+                file=sys.stderr,
+            )
 
     return data
 
