@@ -1,4 +1,5 @@
 import json
+import math
 import math_utils
 import nest_asyncio
 from scipy.stats import norm
@@ -7,6 +8,15 @@ import asyncio
 from termcolor import cprint
 from omegaconf import MISSING
 from omegaconf import DictConfig, ListConfig, OmegaConf
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """Unbiased pass@k estimator (Chen et al. 2021, HumanEval paper).
+    n = total samples, c = correct samples, k = k in pass@k.
+    Returns 1.0 when n - c < k (impossible to have k consecutive failures)."""
+    if n - c < k:
+        return 1.0
+    return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
 def get_config():
     cli_conf = OmegaConf.from_cli()
     yaml_conf = OmegaConf.load(cli_conf.config)
@@ -65,19 +75,30 @@ if __name__ == "__main__":
 
 
     response_length_list = []
-    num_task   = 0
-    num_correct_task = 0
+    num_task        = 0
+    num_correct_task = 0.0   # accumulates per-task pass@1; float because pass_at_k returns float
     final_data = []
     for i in range(len(data)):
         response_length_list = response_length_list + data[i]["response_length"]
+
+        # Build per-response reward signal (z-scored sum of passing tests).
+        # This inner loop is unchanged — reward logic is response-level by design.
         acc_list = []
         for x in data[i]["correctness"]:
             acc_list.append(sum(x))
-            num_correct_task += all(x)
-            num_task += 1
         lengths = data[i]["response_length"]
         rewards = z_score_normalize(acc_list)
         data[i]["rewards"] = rewards
+
+        # Eval metric: unbiased pass@1 per task, averaged over tasks.
+        # A response is "correct" only if ALL its test cases pass.
+        # Previously this counted correct responses / total responses globally,
+        # collapsing tasks with many hard problems toward 0 — now each task
+        # contributes equally as its own pass@1 = c/n.
+        n = len(data[i]["correctness"])
+        c = sum(1 for x in data[i]["correctness"] if all(x))
+        num_correct_task += pass_at_k(n, c, k=1)   # = c/n when n > c >= 1
+        num_task += 1
         
         if config.experiment.function == "train":
 

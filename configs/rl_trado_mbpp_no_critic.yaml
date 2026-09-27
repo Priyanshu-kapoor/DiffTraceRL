@@ -1,0 +1,107 @@
+wandb:
+  entity: null
+  resume: "auto"
+
+
+experiment:
+  project: "rl_trado_mbpp_no_critic"
+  function: "train"
+  start_from_scratch: true
+  total_step: 40
+  save_every: 10
+  eval_every: 10
+  current_epoch: 1
+  deepspeed_file: "auto"
+  num_node: 1
+  node_index: 0
+
+
+model:
+  pretrained_model: "/dcs/large/u5671205/models/TraDo-4B-Instruct"
+  optimized_name: "optimized"
+  model_base: "trado"
+
+
+dataset:
+  train_dataset: "mbpp_critic_train"
+  optimization_data: "mbpp_no_critic_rl_data"
+  data_type: "code"
+
+
+rollout:
+  tensor_parallel_size: 1
+  max_active: 256
+  num_task_per_step: 64
+  num_response_per_task: 8
+  temperature: 1.0
+  max_token: 512
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: 0
+  remasking_strategy: "low_confidence_dynamic"
+  dynamic_threshold: 0.9
+  start_with_think: false
+
+
+execute:
+  num_chunk: 128
+
+
+training:
+  gradient_checkpointing_enable: true
+  gradient_accumulation_steps: 16
+  batch_size_lm: 1
+  mixed_precision: "bf16"
+  enable_tf32: true
+  seed: 10086
+  num_train_epochs: 1
+  max_grad_norm: 1.0
+  method: "TraceRL"
+  block_size: 4
+  shrink: 1
+  post_num: 0
+  max_gen_length: 512
+  max_prompt_len: 1024
+  lower_p: 0.1
+  upper_p: 0.9
+  eps: 0.20
+  beta: 0.01
+  use_kl_estimator_k3: true
+
+
+optimizer:
+  name: adamw
+  params:
+    learning_rate: 1e-6
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1e-8
+
+
+lr_scheduler:
+  scheduler: "cosine"
+  params:
+    learning_rate: ${optimizer.params.learning_rate}
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+
+evaluation:
+  eval_dataset: "mbpp_critic_eval"
+  data_type: "code"
+  tensor_parallel_size: 1
+  max_active: 256
+  num_response_per_task: 3
+  temperature: 1.0
+  max_token: 512
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: 0
+  remasking_strategy:
+    - "low_confidence_dynamic"
+  dynamic_threshold: 0.9
+  start_with_think: false

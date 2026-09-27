@@ -7,20 +7,21 @@ experiment:
   project: "rl_trado_critic_mbpp_with_value"
   function: "train"
   preflight_only: false
-  start_from_scratch: true
+  start_from_scratch: false
   total_step: 80
   save_every: 10
   eval_every: 10
+  monitor_every: 5
   train_value_every: 1
-  current_epoch: 1
-  deepspeed_file: "1_node_4_gpus_deepspeed_zero3"
+  current_epoch: 3
+  deepspeed_file: "auto"
   num_node: 1
   node_index: 0
 
 
 model:
-  pretrained_model: "/abs/path/of/model"
-  value_base_model: "/abs/path/of/model"
+  pretrained_model: "/dcs/large/u5671205/models/TraDo-4B-Instruct"
+  value_base_model: "/dcs/large/u5671205/models/TraDo-4B-Instruct"
   optimized_name: "optimized"
   optimized_value_name: "optimized_value"
   optimized_critic_name: "optimized_critic"
@@ -28,7 +29,7 @@ model:
 
 
 dataset:
-  train_dataset: "mbpp_critic"
+  train_dataset: "mbpp_critic_train"
   optimization_data: "mbpp_critic_rl_data"
   data_type: "code"
 
@@ -37,9 +38,9 @@ rollout:
   tensor_parallel_size: 1
   max_active: 256
   num_task_per_step: 64
-  num_response_per_task: 16
+  num_response_per_task: 8
   temperature: 1.0
-  max_token: 2000
+  max_token: 512
   block_size: 4
   denoising_steps_per_block: 4
   top_p: 1.0
@@ -55,7 +56,7 @@ execute:
 
 training:
   gradient_checkpointing_enable: true
-  gradient_accumulation_steps: 32
+  gradient_accumulation_steps: 16
   batch_size_lm: 1
   mixed_precision: "bf16"
   enable_tf32: true
@@ -66,8 +67,8 @@ training:
   block_size: 4
   shrink: 1
   post_num: 0
-  max_gen_length: 2000
-  max_prompt_len: 784
+  max_gen_length: 512
+  max_prompt_len: 1024
   eps: 0.20
   beta: 0.01
   gam: 1.0
@@ -96,13 +97,13 @@ lr_scheduler:
 
 
 evaluation:
-  eval_dataset: "mbpp_critic"
+  eval_dataset: "mbpp_critic_eval"
   data_type: "code"
   tensor_parallel_size: 1
   max_active: 256
   num_response_per_task: 3
   temperature: 1.0
-  max_token: 2000
+  max_token: 512
   block_size: 4
   denoising_steps_per_block: 4
   top_p: 1.0
@@ -114,14 +115,14 @@ evaluation:
 
 critic:
   enabled: true
-  normalized_data_path: "../../data/mbpp_critic.jsonl"
-  expert_trajectory_path: "../../data/mbpp_masking_trajectories.jsonl"
+  normalized_data_path: "/dcs/large/u5671205/data/mbpp_critic_train.jsonl"
+  expert_trajectory_path: "/dcs/large/u5671205/data/mbpp_masking_trajectories.jsonl"
   expert_cache_path: "${experiment.project}/temp_data/expert_trado_cache.pt"
   buffer_path: "${experiment.project}/temp_data/critic_policy_buffer.pt"
   buffer_size: 4096
   learning_rate: 1e-4
   batch_size: 16
-  num_steps_per_epoch: 200
+  num_steps_per_epoch: 100
   freeze_backbone: true
   pooling: "visible_response_mean"
   reward_mode: "delta_sigmoid"

@@ -1,0 +1,128 @@
+wandb:
+  entity: null
+  resume: "auto"
+
+
+experiment:
+  project: "rl_trado_critic_mbpp_smoke"
+  function: "train"
+  preflight_only: false
+  start_from_scratch: true
+  total_step: 3
+  save_every: 1
+  eval_every: 999
+  monitor_every: 0
+  train_value_every: 1
+  current_epoch: 1
+  deepspeed_file: "auto"
+  num_node: 1
+  node_index: 0
+
+
+model:
+  pretrained_model: "/dcs/large/u5671205/models/TraDo-4B-Instruct"
+  value_base_model: "/dcs/large/u5671205/models/TraDo-4B-Instruct"
+  optimized_name: "optimized"
+  optimized_value_name: "optimized_value"
+  optimized_critic_name: "optimized_critic"
+  model_base: "trado"
+
+
+dataset:
+  train_dataset: "mbpp_critic_train"
+  optimization_data: "mbpp_critic_rl_data"
+  data_type: "code"
+
+
+rollout:
+  tensor_parallel_size: 1
+  max_active: 16
+  num_task_per_step: 8
+  num_response_per_task: 2
+  temperature: 1.0
+  max_token: 512
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: 0
+  remasking_strategy: "low_confidence_dynamic"
+  dynamic_threshold: 0.9
+  start_with_think: false
+
+
+execute:
+  num_chunk: 128
+
+
+training:
+  gradient_checkpointing_enable: true
+  gradient_accumulation_steps: 16
+  batch_size_lm: 1
+  mixed_precision: "bf16"
+  enable_tf32: true
+  seed: 10086
+  num_train_epochs: 1
+  max_grad_norm: 1.0
+  method: "TraceRL"
+  block_size: 4
+  shrink: 1
+  post_num: 0
+  max_gen_length: 512
+  max_prompt_len: 1024
+  eps: 0.20
+  beta: 0.01
+  gam: 1.0
+  lam: 1.0
+  use_kl_estimator_k3: true
+
+
+optimizer:
+  name: adamw
+  params:
+    policy_learning_rate: 1e-6
+    value_learning_rate: 5e-6
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1e-8
+
+
+lr_scheduler:
+  scheduler: "cosine"
+  params:
+    learning_rate: ${optimizer.params.policy_learning_rate}
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+
+evaluation:
+  eval_dataset: "mbpp_critic_eval"
+  data_type: "code"
+  tensor_parallel_size: 1
+  max_active: 256
+  num_response_per_task: 3
+  temperature: 1.0
+  max_token: 512
+  block_size: 4
+  denoising_steps_per_block: 4
+  top_p: 1.0
+  top_k: [0]
+  remasking_strategy: ["low_confidence_dynamic"]
+  dynamic_threshold: 0.9
+  start_with_think: false
+
+
+critic:
+  enabled: true
+  normalized_data_path: "/dcs/large/u5671205/data/mbpp_critic_train.jsonl"
+  expert_trajectory_path: "/dcs/large/u5671205/data/mbpp_masking_trajectories.jsonl"
+  expert_cache_path: "${experiment.project}/temp_data/expert_trado_cache.pt"
+  buffer_path: "${experiment.project}/temp_data/critic_policy_buffer.pt"
+  buffer_size: 4096
+  learning_rate: 1e-4
+  batch_size: 16
+  num_steps_per_epoch: 5
+  freeze_backbone: true
+  pooling: "visible_response_mean"
+  reward_mode: "delta_sigmoid"

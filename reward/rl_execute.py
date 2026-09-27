@@ -22,6 +22,7 @@ def _run_many_pipe(snippet: str, tests: list[str], conn):
     import textwrap
     results = []
     try:
+        conn.send("ready")
         ns = {}
         exec(textwrap.dedent(snippet), ns, ns)
         for stmt in tests:
@@ -51,7 +52,9 @@ def _check_snippet_many(snippet: str, tests: list[str], t_limit: int,
     p.start()
     child_conn.close()
 
-    deadline = time.monotonic() + t_limit + spawn_slack
+    # Child startup (spawn + imports) can take seconds under load; the time
+    # limit only starts once the child reports "ready".
+    deadline = time.monotonic() + 120.0
     res = None
     try:
         while True:
@@ -61,16 +64,23 @@ def _check_snippet_many(snippet: str, tests: list[str], t_limit: int,
             wait = remaining if remaining < 0.05 else 0.05
             if parent_conn.poll(wait):
                 try:
-                    res = parent_conn.recv()
+                    msg = parent_conn.recv()
                 except EOFError:
-                    res = None
+                    break
+                if msg == "ready":
+                    deadline = time.monotonic() + t_limit + spawn_slack
+                    continue
+                res = msg
                 break
             if not p.is_alive():
-                if parent_conn.poll(0.05):
+                while parent_conn.poll(0.05):
                     try:
-                        res = parent_conn.recv()
+                        msg = parent_conn.recv()
                     except EOFError:
-                        res = None
+                        break
+                    if msg != "ready":
+                        res = msg
+                        break
                 break
 
         if res is None and parent_conn.poll(0.05):
@@ -95,7 +105,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def evaluate_function_dataset(data: list[dict], n_workers: int | None = None):
     import os
-    n_cpu = os.cpu_count() or 4
+    try:
+        n_cpu = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n_cpu = os.cpu_count() or 4
     n_workers = max(1, int(n_workers)) if n_workers is not None else n_cpu
 
     for item in data:
@@ -122,6 +135,7 @@ def evaluate_function_dataset(data: list[dict], n_workers: int | None = None):
             fut = pool.submit(_check_snippet_many, snippet, tests, t_limit)
             futures[fut] = (idx, i)
 
+        _verbose = os.environ.get("RLEXEC_VERBOSE") == "1"
         for fut in as_completed(futures):
             idx, i = futures[fut]
             try:
@@ -132,6 +146,16 @@ def evaluate_function_dataset(data: list[dict], n_workers: int | None = None):
             for j, ok in enumerate(ok_list):
                 data[idx]["execution_result"][i][j] = bool(ok)
                 data[idx]["correctness"][i][j]      = bool(ok)
+                if _verbose and not ok:
+                    snippet = data[idx]["extracted_output"][i]
+                    test_stmt = data[idx]["test_list"][j]
+                    print(
+                        f"\n[RLEXEC] FAIL task={data[idx].get('task_id','?')} "
+                        f"response={i} test={j}\n"
+                        f"  test:    {test_stmt}\n"
+                        f"  snippet: {snippet[:300]}",
+                        file=sys.stderr,
+                    )
                 pbar.update(1)
 
     return data
@@ -294,7 +318,16 @@ def evaluate_stdio_dataset(data: list[dict], num_chunks: int):
             item["correctness"][c_idx].append(False)
         item["execution_result"][c_idx][k] = res
         exp_out = item["test_output"][k]
-        item["correctness"][c_idx][k]      = test_if_eq(res, exp_out)
+        match = test_if_eq(res, exp_out)
+        item["correctness"][c_idx][k] = match
+        if os.environ.get("RLEXEC_VERBOSE") == "1" and not match:
+            print(
+                f"\n[RLEXEC] FAIL task={item.get('task_id','?')} "
+                f"response={c_idx} case={k}\n"
+                f"  expected: {exp_out[:200]}\n"
+                f"  got:      {res[:200]}",
+                file=sys.stderr,
+            )
 
     return data
 
@@ -308,10 +341,11 @@ def main():
     num_node = config.experiment.num_node
     node_index = config.experiment.node_index
 
-    if config.experiment.current_epoch == 1:
+    _ckpt_path = "../" + project_name + "/ckpt/" + config.model.optimized_name
+    if config.experiment.current_epoch == 1 or not os.path.isdir(_ckpt_path):
         pretrained_model = config.model.pretrained_model
     else:
-        pretrained_model = "../" + project_name + "/ckpt/" + config.model.optimized_name
+        pretrained_model = _ckpt_path
 
     if config.experiment.function == "train":
         dataset = config.dataset.train_dataset
